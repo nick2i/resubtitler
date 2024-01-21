@@ -14,6 +14,8 @@ User provides subtitle files and media files (e.g. tv/anime episodes) which are 
 
 # TODO: support offsets (positive/negative, e.g. if episode numbering scheme differs from subtitle numbering scheme)
 # TODO: support re-timing the subtitles (more involved, probably only one file type--srt?)
+# TODO: what happens if you invert rename and have more media than subtitles? more subtitles than media? 
+# TODO: go through and cut unused mappings and parameters, I made a bit of a mess working on invert
 
 class ResubtitlerApp:
     def __init__(self, root):
@@ -117,17 +119,28 @@ class ResubtitlerApp:
         self.new_names_area.configure(yscrollcommand=lambda *args: self.sync_scroll('new', *args))
 
         # Buttons for preview and execute
-        self.preview_button = ttk.Button(root, text="Preview Renames", command=self.preview_renames)
-        self.preview_button.grid(row=8, column=1, sticky='w', padx=5, pady=5)
-        self.execute_button = ttk.Button(root, text="Execute Renames", command=self.execute_renames)
-        self.execute_button.grid(row=8, column=1, sticky='e', padx=5, pady=5)
+        button_frame = tk.Frame(root)
+        self.execute_button = ttk.Button(button_frame, text="Execute Renames", command=self.execute_renames)
+        self.execute_button.pack(side="right", anchor="e", pady=5)
+        self.preview_button = ttk.Button(button_frame, text="Preview Renames", command=self.preview_renames)
+        self.preview_button.pack(side="right", anchor="e", pady=5)
+        
+        self.is_invert_rename_var = tk.IntVar()
+        self.invert_checkbox = ttk.Checkbutton(button_frame, text="Invert rename", variable=self.is_invert_rename_var, command=self._invert_checkbox_pressed)
+        self.invert_checkbox.pack(side="right", anchor="e", pady=5)
+        button_frame.grid(row=8, column=1)
+        self.button_frame = button_frame
+    
+    def _invert_checkbox_pressed(self):
+        # TODO change the labels of the two preview areas
+        # TODO (this only makes sense if we add labels to the two preview areas)
+        ...
+        #print("invert renames")
+    
+    def is_inverting_rename(self):
+        return self.is_invert_rename_var.get() == 1
         
     def sync_scroll(self, *args):
-        print("sync_scroll called")
-        print(f"caller: {args[0]}")
-        print("other args:")
-        pprint.pprint(args[1:])
-        
         caller = args[0]
 
         if caller == 'new':
@@ -137,16 +150,30 @@ class ResubtitlerApp:
         
     def select_subtitle_dir(self):
         self.subtitle_dir = filedialog.askdirectory()
+        # TODO: abbreviate the path so it doesn't stretch the display
         self.subtitle_dir_label.config(text=self.subtitle_dir)
         print(f"select subtitle dir: {self.subtitle_dir}")
 
     def select_episode_dir(self):
         self.episode_dir = filedialog.askdirectory()
+        # TODO: abbreviate the path so it doesn't stretch the display
         self.episode_dir_label.config(text=self.episode_dir)
         print(f"select episode dir: {self.episode_dir}")
         
     
     def match_files(self):
+        """
+        Returns a list of tuples, structured like:
+        
+        [
+          (
+            pathlib.Path object representing the original subtitle path,
+            string representing the renamed target subtitle path (nullable),
+            string representing the original episode number, possibly 0-padded
+          ), 
+          . . .
+        ]
+        """
         subtitle_ext = self.subtitle_ext_entry.get().strip()
         episode_ext = self.episode_ext_entry.get().strip()
         subtitle_regex = self.subtitle_regex_entry.get().strip()
@@ -158,26 +185,48 @@ class ResubtitlerApp:
         # Fetch episode files
         episode_files = [f for f in Path(self.episode_dir).glob(f'*.{episode_ext}')]
 
-        # Mapping of episode identifier to filename
-        episode_map = {}
+        # Mapping of episode number to filepath
+        self.episode_map = {}
+        # Mapping of episode number to (possibly zero-padded) episode number
+        self.episode_map_number_raw = {}
         for ep in episode_files:
+            # user input -> episode_regex, ep.name is the episode filename
             match = re.search(episode_regex, ep.name)
             if match:
-                episode_number = match.group()
-                episode_number = episode_number.lstrip('0')
-                episode_map[episode_number] = ep.stem
+                episode_number_raw = match.group()
+                episode_number = episode_number_raw.lstrip('0')
+                # TODO have to store a bit more info here to replicate 0-padded numbering schemes, dangit
+                self.episode_map[episode_number] = ep
+                self.episode_map_number_raw[episode_number] = episode_number_raw
+                
         print("episode map:")
-        pprint.pprint(episode_map)
+        pprint.pprint(self.episode_map)
+        
         # Match subtitles to episodes
         matched_files = []
+        # Mapping of subtitle filename to episode number
+        self.subtitles_to_episode_numbers = {}
         for sub in subtitle_files:
+            # user input -> subtitle_regex, sub.name is the subtitle filename
             match = re.search(subtitle_regex, sub.name)
             # we don't want to match if a regex is missing
-            if match and match.group() in episode_map and episode_regex and subtitle_regex:
-                new_name = episode_map[match.group()] + sub.suffix
-                matched_files.append((sub.name, new_name))
+            if not match:
+                matched_files.append((sub.name, None, None))
             else:
-                matched_files.append((sub.name, None))
+                subtitle_number_raw = match.group()
+                subtitle_number = subtitle_number_raw.lstrip('0')
+                if subtitle_number in self.episode_map and episode_regex and subtitle_regex:
+                    episode = self.episode_map[subtitle_number]
+                    if self.is_inverting_rename():
+                        # The media file will take the subtitle filename pattern
+                        new_name = sub.stem + f".{episode_ext}"
+                        matched_files.append((ep.name, new_name, subtitle_number))
+                        #episode_name = self.episode_map.get(subtitle_episode_number, 'NO MATCH')
+                    else:
+                        # The subtitle file will take the media filename pattern
+                        new_name = episode.stem + f".{subtitle_ext}"
+                        matched_files.append((sub.name, new_name, subtitle_number))
+            self.subtitles_to_episode_numbers[sub.name] = subtitle_episode_number
 
         return matched_files
         
@@ -191,27 +240,47 @@ class ResubtitlerApp:
         except Exception as e:
             print("Error in regex pattern:", e)
             return None
+
+    def _sort_scrolled_text(self):
+        ...
+
+    def _insert_names(self, original, new_name, number):
+        self.original_names_area.insert(tk.END, f'{original}\n')
+        self.new_names_area.insert(tk.END, f'{new_name}\n')
     
     def preview_renames(self):
         self.original_names_area.delete(1.0, tk.END)
         self.new_names_area.delete(1.0, tk.END)
         matched_files = self.match_files()
 
+        # TODO checkbox - invert name change (subtitle -> episode, rather than episode -> subtitle)
         # Generate preview
-        for original, new_name in matched_files:
+        for original, new_name, episode_number in matched_files:
             print(f'{original} --> {new_name}')
             if new_name:
-                self.original_names_area.insert(tk.END, f'{original}\n')
-                self.new_names_area.insert(tk.END, f'{new_name}\n')
+                self._insert_names(original, new_name, episode_number)
             else:
-                # no match
-                self.original_names_area.insert(tk.END, f'{original}\n')
-                self.new_names_area.insert(tk.END, 'NO MATCH\n')
-            #if new_name:
-            #    self.preview_area.insert(tk.END, f'{original.name} --> {new_name}\n')
-            #else:
-            #    self.preview_area.insert(tk.END, f'{original.name} --> No Match Found\n')
+                self._insert_names(original, 'NO MATCH', episode_number)
 
+        def _sort_func(x):
+            tmp = int(self.subtitles_to_episode_numbers[x])
+            #print(tmp)
+            return tmp
+        
+        print("\n\nSUBTITLES TO EPISODE NUMBERS:\n")
+        pprint.pprint(self.subtitles_to_episode_numbers)
+        # sort original_names_area
+        original_names_content = self.original_names_area.get("1.0", tk.END)
+        lines = original_names_content.splitlines()
+        lines.sort(key=_sort_func)
+        self.original_names_area.delete("1.0", tk.END)
+        self.original_names_area.insert("1.0", "\n".join(lines))
+        # sort new_names_area
+        new_names_content = self.new_names_area.get("1.0", tk.END)
+        lines = new_names_content.splitlines()
+        lines.sort(key=_sort_func)
+        self.new_names_area.delete("1.0", tk.END)
+        self.new_names_area.insert("1.0", "\n".join(lines))
 
     def validate_regex(self, var, label):
         pattern = var.get().strip()
